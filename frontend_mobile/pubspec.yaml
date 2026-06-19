@@ -1,0 +1,33 @@
+name: grocery_app
+description: GrocerySync - Inventory & Shopping List Manager
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.0.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # HTTP & storage
+  http: ^1.1.0
+  shared_preferences: ^2.2.1
+
+  # Offline & Sync
+  sqflite: ^2.3.0
+  path: ^1.8.3
+  connectivity_plus: ^6.0.0
+  uuid: ^4.2.1
+
+  # Fonts & icons
+  google_fonts: ^6.1.0
+  material_design_icons_flutter: ^7.0.7296
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true

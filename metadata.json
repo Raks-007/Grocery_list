@@ -1,0 +1,8 @@
+{
+  "name": "Inventory & Shopping Dashboard",
+  "description": "A modern, minimalist dark-themed dashboard for managing master items, categories, and shopping lists.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

@@ -1,0 +1,447 @@
+# Central DB + Offline-First Mobile + Sync Architecture
+
+## Your Question, Broken Down
+
+You're asking for **four things** that work together. Let me explain each concept first, then show exactly how to build it.
+
+---
+
+## 🧠 Concept 1: Central Database (Single Source of Truth)
+
+### What it means
+Right now you already have this! Your MySQL database on `localhost:3306` is the **central database**. Both your React web app and Flutter mobile app connect to the same Express backend (`server.ts`), which talks to the same `grocery_db` MySQL database.
+
+```mermaid
+graph TB
+    subgraph "Central Server (Express + MySQL)"
+        API["Express API<br/>localhost:3000"]
+        DB[("MySQL<br/>grocery_db")]
+        API --> DB
+    end
+    
+    Web["React Web App<br/>(Browser)"] -->|"HTTP /api/*"| API
+    Mobile["Flutter Mobile App<br/>(Phone)"] -->|"HTTP /api/*"| API
+```
+
+### What you already have right ✅
+- Single MySQL database
+- Express API serving both clients
+- JWT-based authentication
+
+### What's missing ❌
+- The mobile app **cannot work offline** — every screen calls `ApiService.get(...)` directly
+- There's no mechanism to **track what changed** since the mobile was last online
+- No **local database** on the mobile phone
+
+---
+
+## 🧠 Concept 2: Shared Authentication
+
+### What it means
+A user registers once and can log in from **both** web and mobile. You already have this too! Both platforms call the same `/api/auth/login` endpoint and receive the same JWT token.
+
+### How JWT works (quick refresher)
+```
+1. User sends email + password → POST /api/auth/login
+2. Server verifies password → creates JWT token containing {id, name, email}
+3. Token is sent back → stored in localStorage (web) or SharedPreferences (mobile)
+4. Every future request includes: Authorization: Bearer <token>
+5. Server decodes token → knows which user is making the request
+```
+
+### What you already have right ✅
+- Same login/register endpoints for both platforms
+- JWT token stored in `localStorage` (web) and `SharedPreferences` (mobile)
+
+### What could be improved 🔧
+- Add **refresh tokens** so users don't get logged out after the JWT expires
+- But this is optional — not blocking anything. We can add it later.
+
+---
+
+## 🧠 Concept 3: Offline-First Mobile (THE BIG ONE)
+
+### What it means
+Your mobile app should work **without internet**. The user should be able to:
+- View their grocery items, categories, shopping lists
+- Add/edit/delete items
+- Mark items as purchased
+
+All **without** any server connection. Then, when internet comes back, everything syncs.
+
+### How it works — the "Local-First" pattern
+
+```mermaid
+graph LR
+    subgraph "Phone (Flutter App)"
+        UI["UI Screens"]
+        REPO["Repository Layer"]
+        LOCAL[("SQLite<br/>Local DB")]
+        SYNC["Sync Engine"]
+    end
+    
+    subgraph "Server"
+        API["Express API"]
+        REMOTE[("MySQL<br/>Central DB")]
+    end
+    
+    UI --> REPO
+    REPO --> LOCAL
+    SYNC -->|"Pull changes"| API
+    SYNC -->|"Push changes"| API
+    API --> REMOTE
+    SYNC <-->|"Read/Write"| LOCAL
+```
+
+**The key idea:** Your UI **never** talks to the server directly. It always reads/writes to the **local SQLite database**. A separate **Sync Engine** runs in the background and keeps the local DB in sync with the server.
+
+### Why this pattern?
+| Scenario | Without offline-first | With offline-first |
+|---|---|---|
+| No internet | ❌ App shows errors/blank | ✅ Everything works |
+| Slow internet | ⏳ UI freezes waiting | ✅ Instant, syncs in background |
+| Add item offline | ❌ Fails | ✅ Saved locally, synced later |
+| Open app on subway | ❌ Nothing loads | ✅ Shows last synced data |
+
+---
+
+## 🧠 Concept 4: Sync — How Changes Flow
+
+### The Problem
+If someone adds an item from the **web** while the phone is offline, how does the phone know about it later?
+
+### The Solution: Timestamp-Based Sync
+
+Every record in the database gets two new columns:
+- `updated_at` — when was this record last modified?
+- `is_deleted` — was this record deleted? (we never truly delete, we "soft delete")
+
+The mobile app remembers: *"The last time I synced was at 2024-01-15 10:30:00"*
+
+When it comes online, it asks the server: *"Give me everything that changed after 2024-01-15 10:30:00"*
+
+```mermaid
+sequenceDiagram
+    participant Phone as 📱 Mobile App
+    participant Server as 🖥️ Express API
+    participant DB as 🗄️ MySQL
+
+    Note over Phone: Comes online after being offline
+
+    Phone->>Server: GET /api/sync/pull?since=2024-01-15T10:30:00
+    Server->>DB: SELECT * WHERE updated_at > '2024-01-15T10:30:00' AND user_id = 5
+    DB-->>Server: Changed categories, items, lists...
+    Server-->>Phone: {categories: [...], masterItems: [...], ...}
+    
+    Note over Phone: Also has local changes made while offline
+    
+    Phone->>Server: POST /api/sync/push {changes: [...]}
+    Server->>DB: INSERT/UPDATE each change
+    Server-->>Phone: {ok: true, serverVersions: [...]}
+    
+    Note over Phone: Updates local "last_synced" timestamp
+```
+
+### What about conflicts?
+If the **same item** was edited on both web and mobile while offline, we need a rule. The simplest and most practical rule for a grocery app:
+
+> **Last Write Wins** — whichever change has the later `updated_at` timestamp wins.
+
+This is simple, predictable, and perfectly fine for a grocery app (you're not editing legal documents here!).
+
+---
+
+## Proposed Changes
+
+### Architecture Overview
+
+```mermaid
+graph TB
+    subgraph "Backend (Express)"
+        direction TB
+        AUTH["Auth Routes<br/>/api/auth/*"]
+        CRUD["CRUD Routes<br/>/api/categories, items, lists"]
+        SYNCAPI["NEW: Sync Routes<br/>/api/sync/pull<br/>/api/sync/push"]
+        DB[("MySQL + new columns:<br/>updated_at, is_deleted, uuid")]
+    end
+    
+    subgraph "Web App (React)"
+        WEB_UI["React Pages"]
+        WEB_API["apiFetch()"]
+    end
+    
+    subgraph "Mobile App (Flutter)"
+        MOB_UI["Flutter Screens"]
+        REPO["NEW: Repository Layer"]
+        LOCAL[("NEW: Local SQLite")]
+        SYNC["NEW: Sync Engine"]
+        CONN["NEW: Connectivity Monitor"]
+    end
+    
+    WEB_UI --> WEB_API --> CRUD
+    WEB_UI --> WEB_API --> AUTH
+    
+    MOB_UI --> REPO --> LOCAL
+    SYNC <--> LOCAL
+    SYNC <--> SYNCAPI
+    CONN -->|"online/offline"| SYNC
+    
+    AUTH --> DB
+    CRUD --> DB
+    SYNCAPI --> DB
+```
+
+---
+
+### Phase 1: Backend — Add Sync Support
+
+#### [MODIFY] [index.ts](file:///c:/Users/raksh/Desktop/GrocerySho_List/db/index.ts)
+
+Add sync-enabling columns to every table:
+
+```sql
+-- Every table gets these new columns:
+uuid VARCHAR(36) UNIQUE    -- Globally unique ID (for cross-device identity)
+updated_at DATETIME        -- When was this last changed?
+is_deleted BOOLEAN DEFAULT 0  -- Soft delete flag
+```
+
+**Why UUIDs?** Right now your tables use auto-increment IDs (`id INT PRIMARY KEY AUTO_INCREMENT`). The problem: if the mobile creates an item offline, it gets local ID `42`. Meanwhile the server also assigns ID `42` to a different item. UUIDs solve this — they're globally unique regardless of where they're generated.
+
+**Why soft deletes?** If you truly `DELETE` a row from the server, the mobile will never know it was deleted. With `is_deleted`, the sync pull can say "this item was deleted, remove it locally too."
+
+Changes:
+- Add `uuid`, `updated_at`, `is_deleted` columns to all 6 tables
+- Add migration logic to add columns to existing tables
+- Add a trigger/default to auto-set `updated_at` on every INSERT/UPDATE
+
+---
+
+#### [MODIFY] [server.ts](file:///c:/Users/raksh/Desktop/GrocerySho_List/backend/server.ts)
+
+Changes:
+- Modify all existing CRUD routes to:
+  - Set `updated_at = NOW()` on every INSERT and UPDATE
+  - Use `is_deleted = 1` instead of `DELETE FROM`
+  - Add `AND is_deleted = 0` to all SELECT queries
+  - Generate a UUID for every new record
+- Keep all existing routes working (web app doesn't break)
+
+---
+
+#### [NEW] [sync.ts](file:///c:/Users/raksh/Desktop/GrocerySho_List/backend/sync.ts)
+
+Two new endpoints:
+
+**`GET /api/sync/pull?since=<timestamp>`**
+- Returns all records (across all tables) modified after `since` for the authenticated user
+- Includes deleted records (so mobile can remove them locally)
+- Response shape:
+```json
+{
+  "categories": [...],
+  "masterItems": [...],
+  "shoppingLists": [...],
+  "shoppingListItems": [...],
+  "purchaseHistory": [...],
+  "serverTime": "2024-01-15T12:00:00Z"
+}
+```
+
+**`POST /api/sync/push`**
+- Receives an array of local changes from the mobile
+- Each change has: `uuid`, `table`, `data`, `updated_at`
+- Server applies each change using "last write wins" (compares timestamps)
+- Returns the final server version of each pushed record
+
+---
+
+### Phase 2: Flutter Mobile — Offline-First Architecture
+
+#### [NEW] `pubspec.yaml` additions
+
+New dependencies:
+```yaml
+sqflite: ^2.3.0          # SQLite database for Flutter
+path: ^1.8.3             # File path utilities
+connectivity_plus: ^6.0.0 # Detect online/offline status
+uuid: ^4.2.1             # Generate UUIDs on-device
+```
+
+---
+
+#### [NEW] [local_database.dart](file:///c:/Users/raksh/Desktop/GrocerySho_List/frontend_mobile/lib/data/local_database.dart)
+
+Creates and manages a local SQLite database on the phone with the **same schema** as the server (minus the server-only fields). This is the "mini MySQL" living on the phone.
+
+Tables mirror the server:
+- `categories`, `master_items`, `shopping_lists`, `shopping_list_items`, `purchase_history`
+- Each has `uuid`, `updated_at`, `is_deleted`
+- Additional column: `is_dirty` (tracks "was this changed locally and not yet synced?")
+
+---
+
+#### [NEW] [sync_engine.dart](file:///c:/Users/raksh/Desktop/GrocerySho_List/frontend_mobile/lib/data/sync_engine.dart)
+
+The brain of offline-first. Handles:
+
+1. **Pull**: Fetch changes from server → update local SQLite
+2. **Push**: Send local dirty records → server → clear dirty flag
+3. **Conflict resolution**: Last-write-wins based on `updated_at`
+4. **Connectivity monitoring**: Auto-sync when internet returns
+
+```dart
+class SyncEngine {
+  // Called when app starts or connectivity changes
+  Future<void> sync() async {
+    if (!await hasInternet()) return;
+    
+    await pushLocalChanges();  // Send our offline changes first
+    await pullServerChanges(); // Then get what others changed
+  }
+}
+```
+
+---
+
+#### [NEW] [repository.dart](file:///c:/Users/raksh/Desktop/GrocerySho_List/frontend_mobile/lib/data/repository.dart)
+
+The **Repository Pattern** — this is the single layer your UI talks to. The screens never call `ApiService` or `LocalDatabase` directly. They call `Repository`, which decides what to do.
+
+```dart
+class Repository {
+  // UI calls this — it always reads from local SQLite (instant!)
+  Future<List<Category>> getCategories() => localDb.getCategories();
+  
+  // UI calls this — saves to local SQLite, marks as dirty
+  Future<void> addCategory(String name) {
+    localDb.insertCategory(name, isDirty: true);
+    syncEngine.triggerSync(); // try to sync if online
+  }
+}
+```
+
+**Why a repository?** It decouples your UI from the data source. Your screens don't care if data comes from SQLite, the server, or magic. They just call `repository.getCategories()`. This makes your code much cleaner and easier to test.
+
+---
+
+#### [MODIFY] All screen files in [screens/](file:///c:/Users/raksh/Desktop/GrocerySho_List/frontend_mobile/lib/screens)
+
+Refactor every screen to:
+- Use `Repository` instead of `ApiService` directly
+- Show data from local SQLite (instant, works offline)
+- Show a "sync status" indicator (synced / syncing / offline)
+
+---
+
+#### [NEW] [connectivity_service.dart](file:///c:/Users/raksh/Desktop/GrocerySho_List/frontend_mobile/lib/data/connectivity_service.dart)
+
+Monitors network status and triggers sync:
+```dart
+class ConnectivityService {
+  // Listens for connectivity changes
+  // When phone goes from offline → online, triggers SyncEngine.sync()
+}
+```
+
+---
+
+### Phase 3: Web App — Minor Adjustments
+
+#### [MODIFY] [api.ts](file:///c:/Users/raksh/Desktop/GrocerySho_List/src/lib/api.ts)
+- No major changes needed — web always has internet
+- Minor: filter out `is_deleted` items in responses (handled server-side)
+
+---
+
+## How the Complete Flow Works
+
+### Scenario: User adds item on web while phone is offline
+
+```mermaid
+sequenceDiagram
+    participant Web as 🖥️ Web App
+    participant Server as ☁️ Express + MySQL
+    participant Phone as 📱 Mobile (Offline)
+    
+    Note over Phone: 📵 Phone is offline
+    
+    Web->>Server: POST /api/master-items {name: "Avocado"}
+    Server->>Server: INSERT with uuid, updated_at = NOW()
+    Server-->>Web: ✅ Item created
+    
+    Note over Phone: Some time passes...
+    Note over Phone: 📶 Phone comes online!
+    
+    Phone->>Server: GET /api/sync/pull?since=<last_sync_time>
+    Server-->>Phone: {masterItems: [{name: "Avocado", ...}]}
+    Phone->>Phone: INSERT "Avocado" into local SQLite
+    
+    Note over Phone: User sees "Avocado" appear! ✨
+```
+
+### Scenario: User adds item on phone while offline
+
+```mermaid
+sequenceDiagram
+    participant Phone as 📱 Mobile (Offline)
+    participant SQLite as 📦 Local SQLite
+    participant Server as ☁️ Express + MySQL
+    
+    Note over Phone: 📵 Phone is offline
+    
+    Phone->>SQLite: INSERT "Mangoes" (uuid=abc, is_dirty=true)
+    Note over Phone: UI shows "Mangoes" instantly!
+    
+    Note over Phone: 📶 Phone comes online!
+    
+    Phone->>Server: POST /api/sync/push [{uuid: "abc", table: "master_items", data: {name: "Mangoes"}}]
+    Server->>Server: INSERT into MySQL
+    Server-->>Phone: ✅ Synced
+    Phone->>SQLite: UPDATE is_dirty = false WHERE uuid = "abc"
+    
+    Note over Phone: Now visible on web too! ✨
+```
+
+---
+
+## Summary of All File Changes
+
+| File | Action | Purpose |
+|---|---|---|
+| [index.ts](file:///c:/Users/raksh/Desktop/GrocerySho_List/db/index.ts) | MODIFY | Add `uuid`, `updated_at`, `is_deleted` columns |
+| [server.ts](file:///c:/Users/raksh/Desktop/GrocerySho_List/backend/server.ts) | MODIFY | Soft deletes, UUID generation, set `updated_at` |
+| `backend/sync.ts` | NEW | `/api/sync/pull` and `/api/sync/push` endpoints |
+| `pubspec.yaml` | MODIFY | Add sqflite, connectivity_plus, uuid dependencies |
+| `lib/data/local_database.dart` | NEW | SQLite database on phone |
+| `lib/data/sync_engine.dart` | NEW | Push/pull sync logic |
+| `lib/data/repository.dart` | NEW | Data access layer for UI |
+| `lib/data/connectivity_service.dart` | NEW | Network monitoring + auto-sync |
+| All `lib/screens/*.dart` | MODIFY | Use Repository instead of ApiService |
+
+---
+
+## Open Questions
+
+> [!IMPORTANT]
+> **MySQL hosting**: Right now your MySQL runs on `localhost`. For the mobile app to connect over the internet (not just local Wi-Fi), you'll need to deploy the backend + MySQL somewhere. Are you planning to use a cloud provider (e.g., Railway, Render, AWS, or a VPS)? Or for now, are you only testing on the same Wi-Fi network?
+
+> [!IMPORTANT]  
+> **Scope of offline support**: Should **all** features work offline, or just viewing + adding items? For example, should "Complete Shopping List" (which records purchase history) also work offline?
+
+> [!NOTE]
+> **Multi-device conflict scenario**: If two users edit the same item at the same time (one on web, one on mobile), "last write wins" means one edit will be overwritten. For a grocery app this is fine. Just confirming you're okay with this approach?
+
+---
+
+## Verification Plan
+
+### Automated Tests
+- Backend sync endpoint tests with `curl` or a test script
+- Verify soft-delete filtering works on all existing routes
+
+### Manual Verification
+1. **Offline test**: Turn on airplane mode on phone → add items → turn off airplane mode → verify items appear on web
+2. **Web-to-mobile sync**: Add item on web → open mobile app → verify it appears
+3. **Conflict test**: Edit same item on both web and mobile (while mobile is offline) → go online → verify last-write-wins works correctly
+4. **Fresh install test**: Login on a new phone → verify all data syncs down from server
