@@ -19,4 +19,4 @@ workflows:
           cd build/ios/iphoneos
           zip -r app.zip Runner.app
     artifacts:
-      - frontend_mobile/build/ios/iphoneos/app.zip
+      - build/ios/iphoneos/app.zip
