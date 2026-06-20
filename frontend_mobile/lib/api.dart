@@ -6,11 +6,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 class ApiService {
   static String get _baseUrl {
-    // Android Emulator: 10.0.2.2 maps to host machine's localhost
-    if (kIsWeb) return 'http://localhost:3000/api';
-    // Use the machine's local IP address so physical devices on the same Wi-Fi can connect
-    return 'http://192.168.29.193:3000/api';
-    return 'http://localhost:3000/api';
+    return 'https://grocerylist-production-365a.up.railway.app/api';
   }
 
   static Future<Map<String, String>> _getHeaders() async {

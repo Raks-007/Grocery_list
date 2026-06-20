@@ -1,0 +1,18 @@
+workflows:
+  ios-release:
+    name: iOS Release Build
+    instance_type: mac_mini_m1
+    working_directory: frontend_mobile
+    environment:
+      flutter: stable
+      xcode: latest
+      cocoapods: default
+    scripts:
+      - name: Get Flutter packages
+        script: |
+          flutter packages pub get
+      - name: Build iOS App
+        script: |
+          flutter build ios --release --no-codesign
+    artifacts:
+      - frontend_mobile/build/ios/iphoneos/*.app

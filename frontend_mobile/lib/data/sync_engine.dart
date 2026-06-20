@@ -48,9 +48,7 @@ class SyncEngine {
 
   /// Get the API base URL (same logic as ApiService)
   String get _baseUrl {
-    // For physical device testing, use your machine's local IP
-    // For emulator testing, use 10.0.2.2
-    return 'http://192.168.29.193:3000/api';
+    return 'https://grocerylist-production-365a.up.railway.app/api';
   }
 
   /// Get auth headers
